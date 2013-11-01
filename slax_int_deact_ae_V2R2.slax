@@ -1,0 +1,498 @@
+/*
+ 
+* Original Author  : Curtis Call
+* Modified by      : Tommy Baum
+ 
+* Version          : 2.2
+ 
+* Last Modified    : January 7, 2013
+ 
+*
+ 
+* Description   : Event script is executed each time a SNMP_TRAP_LINK_DOWN is 
+
+ * received, and if the event was fired due to a physical interface that is part
+ 
+* of an AE bundle going into up/down state, then deactivate the interface and
+ 
+* log a message indicating what was done.
+ 
+*
+ 
+* If an error occurs when trying to commit, then the script will log an error and will
+ 
+* NOT retry.
+ 
+*
+ 
+* To enable: 
+
+ * 1. Save to /var/run/scripts/event
+ 
+* 2. Configure: set event-options event-script file deactivate-lacp-child-link.slax
+ 
+*
+ 
+* License       : BSD-Style
+ 
+*  Copyright (c) 2013 Curtis Call. All Rights Reserved.
+ 
+*  Redistribution and use in source and binary forms, with or without modification,
+ 
+ *  are permitted provided that the following conditions are met:
+ 
+*  1. Redistributions of source code must retain the above copyright notice, this
+ 
+ *  list of conditions and the following disclaimer.
+ 
+*  2. Redistributions in binary form must reproduce the above copyright notice, 
+
+ *  this list of conditions and the following disclaimer in the documentation and/or
+ 
+*  other materials provided with the distribution.
+ 
+*  3. The name of the author may not be used to endorse or promote products derived
+ 
+ *  from this software without specific prior written permission.
+ 
+*  THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED 
+
+ *  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ 
+ *  AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE
+ 
+ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ 
+ *  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ 
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ 
+ *  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ 
+ *  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ 
+ *  IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+*/ 
+
+ 
+ 
+version 1.0;
+ 
+ 
+ 
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ 
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ 
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ 
+ 
+ 
+import "../import/junos.xsl";
+ 
+ 
+/* ADD EXPAND EVENT HANDLE FOR LACP_INTF_DOWN  .. This happens on 'soft' failure [LACP times out, light present] */ 
+ 
+/* Name:          LACP_INTF_DOWN
+* Message:       <interface-name>: Interface marked down due to lacp timeout on member <child-interface-name>
+* Help:          The interface marked down
+* Description:   The Link Aggregation Control Protocol process (lacpd) experienced timeout hence interface marked down.
+* Type:          Event: This message reports an event, not an error
+* Severity:      notice
+* Facility:      LOG_DAEMON
+
+* Name:          SNMP_TRAP_LINK_DOWN
+* Message:       ifIndex <snmp-interface-index>, ifAdminStatus <admin-status>, ifOperStatus <operational-status>, ifName <interface-name>
+* Help:          linkDown trap was sent
+* Description:   The SNMP agent process (snmpd) generated a linkDown trap because the indicated interface changed state to 'down'.
+* Type:          Event: This message reports an event, not an error
+* Severity:      warning
+* Facility:      LOG_DAEMON
+ */
+
+/* The embedded event policy */
+ 
+var $event-definition = {
+ 
+    <event-options> {
+ 
+        <policy> {
+ 
+            <name> "deactivate-lacp-child-link-1";
+ 
+            <events> "LACP_INTF_DOWN";
+ 
+            <then> {
+ 
+                <event-script> {
+ 
+                    <name> "deactivate-lacp-child-link.slax";
+ 
+                }
+ 
+            }
+		}
+        <policy> {
+ 
+            <name> "deactivate-lacp-child-link-2";
+ 
+            <events> "SNMP_TRAP_LINK_DOWN";
+ 
+            <then> {
+ 
+                <event-script> {
+ 
+                    <name> "deactivate-lacp-child-link.slax";
+ 
+                }
+ 
+            } 
+        }
+ 
+    }
+ 
+}
+ 
+ 
+ 
+match / {
+ 
+    
+
+    /* Retrieve the interface that just went down */
+    /* two potential triggering events */	
+	
+    var $name = event-script-input/trigger-event/attribute-list/attribute[name=="interface-name"]/value;
+ 
+ 
+    /* Exit if the name is blank... */
+ 
+    if( jcs:empty( $name ) ) {
+ 
+        <xsl:message terminate="yes"> "No interface name was provided.";
+ 
+    }
+ 
+   
+    /* Exit if it isn't the physical */
+ 
+    if( contains( $name, "." ) ) {
+ 
+        <xsl:message terminate="yes"> "Ignorning logical interface event.";
+ 
+    }
+ 
+    
+    /* Grab the interface terse output */
+ 
+    var $rpc1 = {
+ 
+        <get-interface-information> {
+ 
+            <terse>;
+ 
+            <interface-name> $name;
+ 
+        }
+ 
+    }
+ 
+    var $interface-results = jcs:invoke( $rpc1 );
+ 
+    
+
+    /* Is there a physical interface? If not then that's a problem */
+ 
+    if( jcs:empty( $interface-results/physical-interface ) ) {
+ 
+        expr jcs:syslog( "daemon.warning", "Script called for non-existent interface: ", $name );
+ 
+        <xsl:message terminate="yes"> "Interface isn't present.";
+ 
+    }
+ 
+       /* Grab the LACP output */
+ 
+    var $rpc2 = {
+ 
+        <get-lacp-interface-information> {
+ 
+            <interface-name> $name;
+ 
+        }
+ 
+    } 
+
+	var $interface-LACP-results = jcs:invoke( $rpc2 );	
+
+    /* If LACP is not configured on the interface then exit */
+ 
+    if( jcs:empty( $interface-LACP-results/lag-lacp-protocol ) ) {
+ 
+        
+        <xsl:message terminate="yes"> "LACP not configired on interface.";
+ 
+    }	
+	
+	
+    /* If it isn't part of an ae bundle or isn't in up down state then exit */
+ 
+    if( $interface-results/physical-interface/admin-status == "down" || $interface-results/physical-interface/oper-status == "up" ||
+ 
+        jcs:empty( $interface-results/physical-interface/logical-interface/address-family/ae-bundle-name ) ) {
+ 
+        
+        <xsl:message terminate="yes"> "Not the type of interface or state that we're looking for.";
+ 
+    }
+ 
+     /* Grab the Parent AE output */
+ 
+    var $rpc3 = {
+ 
+        <get-interface-information> {
+ 
+            <terse>;
+ 
+            <interface-name> $interface-results/physical-interface/logical-interface/address-family/ae-bundle-name;
+ 
+        }
+ 
+    }
+ 
+    var $AE-interface-results = jcs:invoke( $rpc3 );
+ 
+      /* Grab the Parent AE Mcast output (is PIM running on the AE in question) */
+ 
+    var $rpc4 = {
+ 
+        <get-pim-interfaces-information> {
+ 
+ 
+            <interface-name> $interface-results/physical-interface/logical-interface/address-family/ae-bundle-name;
+ 
+        }
+ 
+    }
+ 
+    var $AE-Mcast-interface-results = jcs:invoke( $rpc4 );
+	
+ 
+    /* If the ae bundle is not running multicast then exit */
+ 
+    if( jcs:empty( $AE-Mcast-interface-results/pim-interfaces-information/pim-interface ) ) {
+
+        <xsl:message terminate="yes"> "Parent AE interface is not running PIM.";
+ 
+    }
+
+
+    /* Is the interface adminsitrativly down then exit */
+ 
+    if( $interface-results/physical-interface/admin-status == "down" ) {
+
+        <xsl:message terminate="yes"> "Interface state is Admin down.";
+ 
+    }	
+
+    /* If the ae bundle is down then exit */
+
+    if( $AE-interface-results/physical-interface/admin-status == "down" || $AE-interface-results/physical-interface/oper-status == "down" ) {
+ 
+        <xsl:message terminate="yes"> "Parent AE for interface is down.";
+ 
+    }
+
+    /* Is the interface still down if not then exit */
+
+    /* Grab the interface terse output again to check for what TWC describes as a 'micro-flap'*/
+ 
+    var $rpc5 = {
+ 
+        <get-interface-information> {
+ 
+            <terse>;
+ 
+            <interface-name> $name;
+ 
+        }
+ 
+    }	
+ 
+    var $second-interface-results = jcs:invoke( $rpc5 );
+ 
+    if( $second-interface-results/physical-interface/oper-status == "up" ) {
+ 
+        <xsl:message terminate="yes"> "Interface is now up, no action.";
+ 
+    }
+ 
+ 
+    /* Otherwise, if we reach this point then we need to deactivate it */
+ 
+    var $connection1 = jcs:open();
+ 
+    
+
+    /* Create the configuration change */
+ 
+    var $change1 = {
+ 
+        <configuration> {
+ 
+            <interfaces> {
+ 
+                <interface inactive="inactive"> {
+ 
+                    <name> $name;
+ 
+                }
+ 
+            }
+ 
+        }
+ 
+    }
+ 
+        
+
+    /* Commit should be synchronized */
+ 
+    var $commit-options1 := {
+ 
+        <commit-options> {
+ 
+            <synchronize>;
+ 
+            <log> "Deactivating AE child interface " _ $name _ "due to up/down state.";
+ 
+        }
+ 
+    }
+ 
+    
+
+    /* Pass the configuration change to jcs:load-configuration */
+ 
+    var $results1 := { call jcs:load-configuration( $connection1, $configuration=$change1, $commit-options1 ); }
+ 
+        
+
+    /* Report on errors or success... */
+ 
+    if( $results1//xnm:error ) {
+ 
+        for-each( $results1//xnm:error ) {
+ 
+            expr jcs:syslog( "daemon.warning", "deactivate-lacp-child-link commit error: ", message );
+ 
+        }
+ 
+        expr jcs:syslog( "daemon.error", "Could not automatically deactivate interface ", $name, " with up/down state. Please deactivate it manually." );
+
+        <xsl:message terminate="yes"> "Could not automatically deactivate interface.";
+ 
+    }
+ 
+    else {
+ 
+        expr jcs:syslog( "daemon.notice", "AE child interface ", $name, " was deactivated due to up/down state." );
+ 
+    }
+ 
+    
+
+    /* Close the connection */
+ 
+    expr jcs:close( $connection1 );
+ 
+ 
+ /* ADD PAUSE FOR 'x' seconds emulates INTERFACE HOLD DOWN */
+ 
+ 
+	expr jcs:sleep(5,0);
+ 
+ 
+ 
+ 
+     /* At this point then we need to activate it */
+ 
+    var $connection2 = jcs:open();
+ 
+    
+
+    /* Create the configuration change */
+ 
+    var $change2 = {
+ 
+        <configuration> {
+ 
+            <interfaces> {
+ 
+                <interface active="active"> {
+ 
+                    <name> $name;
+ 
+                }
+ 
+            }
+ 
+        }
+ 
+    }
+ 
+        
+
+    /* Commit should be synchronized */
+ 
+    var $commit-options2 := {
+ 
+        <commit-options> {
+ 
+            <synchronize>;
+ 
+            <log> "Activating AE child interface " _ $name _ "due to up/down state.";
+ 
+        }
+ 
+    }
+ 
+    
+
+    /* Pass the configuration change to jcs:load-configuration */
+ 
+    var $results2 := { call jcs:load-configuration( $connection2, $configuration=$change2, $commit-options2 ); }
+ 
+        
+
+    /* Report on errors or success... */
+ 
+    if( $results2//xnm:error ) {
+ 
+        for-each( $results2//xnm:error ) {
+ 
+            expr jcs:syslog( "daemon.warning", "deactivate-lacp-child-link commit error: ", message );			
+ 
+        }
+ 
+        expr jcs:syslog( "daemon.error", "Could not automatically activate interface ", $name, " with up/down state. Please activate it manually." );
+ 
+		<xsl:message terminate="yes"> "Could not automatically activate interface.";
+ 
+    }
+ 
+    else {
+ 
+        expr jcs:syslog( "daemon.notice", "AE child interface ", $name, " was activated due to up/down state." );
+ 
+    }
+ 
+    
+
+    /* Close the connection */
+ 
+    expr jcs:close( $connection2 );
+ 
+ 
+}
